@@ -1,0 +1,109 @@
+name: image
+
+# Builds the Kali + kali-linux-headless image and publishes it to
+# ghcr.io/cvanh/redteam-tools, where bin/request_container.sh picks it up.
+#
+# Authentication uses the workflow's own GITHUB_TOKEN (packages: write); no
+# repository secrets are required. The package must be public for the cluster
+# to pull it without an imagePullSecret.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .dockerignore
+      - .github/workflows/image.yaml
+      - Dockerfile
+  workflow_dispatch:
+  # Kali rolling moves; rebuild weekly so the image does not rot.
+  schedule:
+    - cron: "17 3 * * 1"
+
+env:
+  IMAGE: ghcr.io/cvanh/redteam-tools
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The image is ~9.4 GB uncompressed and the build loads a second copy
+      # into the Docker daemon; the runner ships only ~14 GB free.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /opt/hostedtoolcache \
+            /usr/local/share/boost \
+            /usr/share/swift
+          sudo docker system prune -af
+          df -h /
+
+      - name: Set image tags
+        run: echo "DATE_TAG=kali-$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build locally first so the smoke test inspects the exact image that
+      # gets pushed. Only the amd64 image is published (the cluster is amd64).
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:ci
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.DATE_TAG }}
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+          # Deliberately no layer cache: caching the apt layer would replay the
+          # previous kali-linux-headless install and defeat the weekly refresh.
+
+      - name: Smoke test
+        run: |
+          docker run --rm --security-opt=no-new-privileges "${IMAGE}:ci" bash -lc '
+            set -euo pipefail
+            dpkg -s kali-linux-headless > /dev/null
+            for tool in nmap msfconsole hydra tcpdump; do
+              command -v "$tool" > /dev/null
+            done
+            # Executes the wrapper too: catches file capabilities that the
+            # bounded capability set rejects.
+            nmap --version > /dev/null
+            tcpdump --version > /dev/null
+          '
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push immutable tags first; :latest moves only after they succeed.
+      - name: Push
+        run: |
+          set -euo pipefail
+          tags=(
+            "${IMAGE}:sha-${GITHUB_SHA}"
+            "${IMAGE}:${DATE_TAG}"
+            "${IMAGE}:latest"
+          )
+          for tag in "${tags[@]}"; do
+            docker push "$tag"
+          done

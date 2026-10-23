@@ -7,12 +7,12 @@ set -euo pipefail
 
 readonly DEFAULT_HOST="ubuntu@45.135.58.222"
 readonly NAMESPACE="kali"
-readonly DEFAULT_IMAGE="docker.io/kalilinux/kali-rolling:latest"
+readonly DEFAULT_IMAGE="ghcr.io/cvanh/redteam-tools:latest"
 readonly DEFAULT_TTL="15m"
 readonly MAX_TTL_SECONDS=$((2 * 3600))
 readonly MIN_TTL_SECONDS=30
 readonly CLEANUP_GRACE_SECONDS=120
-readonly READY_TIMEOUT_SECONDS=120
+readonly READY_TIMEOUT_SECONDS=600
 readonly SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30)
 
 die() {
@@ -31,7 +31,7 @@ Options:
   --ttl DUR       Lifetime of the Job. Examples: 90s, 15m, 2h.
                   Default: 15m. Maximum: 2h.
   --name NAME     Explicit Job name. Default: kali-<UTC timestamp>-<random hex>.
-  --image IMAGE   Container image. Default: docker.io/kalilinux/kali-rolling:latest.
+  --image IMAGE   Container image. Default: ghcr.io/cvanh/redteam-tools:latest.
   --cmd COMMAND   Run COMMAND non-interactively instead of opening a shell.
   --no-attach     Create the Job, print how to connect, and exit.
   --rm            Delete the Job when the shell/command exits.
@@ -139,7 +139,9 @@ spec:
       containers:
         - name: kali
           image: ${image}
-          imagePullPolicy: IfNotPresent
+          # :latest is mutable; Always keeps nodes from serving a cached build
+          # after a new image is pushed.
+          imagePullPolicy: Always
           command: ["sleep", "infinity"]
           # Keep the default capability set (which includes NET_RAW for
           # nmap/tcpdump-style tools); explicitly adding NET_RAW is rejected by

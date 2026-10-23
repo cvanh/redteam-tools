@@ -2,6 +2,10 @@
 
 Short-lived Kali Linux containers on the `compute` Kubernetes cluster.
 
+The container image is built from this repo's `Dockerfile` (Kali rolling plus
+`kali-linux-headless`) by GitHub Actions and published to
+`ghcr.io/cvanh/redteam-tools`. See [Image](#image).
+
 ## Usage
 
 ```bash
@@ -12,20 +16,59 @@ Short-lived Kali Linux containers on the `compute` Kubernetes cluster.
 ./bin/request_container.sh --dry-run                # print manifests, touch nothing
 ```
 
-Requirements: SSH access to `ubuntu@45.135.58.222`; no local `kubectl` or kubeconfig needed.
-
 ## Options
 
 | Option | Description |
 |---|---|
 | `--ttl DUR` | Lifetime: `90s`, `15m`, `2h`. Default `15m`, max `2h`. |
-| `--name NAME` | Job name. Default `kali-<timestamp>-<hex>`. |
-| `--image IMAGE` | Default `docker.io/kalilinux/kali-rolling:latest`. |
+| `--name NAME` | Job name. Default: `kali-<timestamp>-<hex>`. |
+| `--image IMAGE` | Default `ghcr.io/cvanh/redteam-tools:latest`. |
 | `--cmd COMMAND` | Run one command instead of opening a shell. |
 | `--no-attach` | Create only; print connect/delete commands. |
 | `--rm` | Delete the Job when the shell/command exits. |
 | `--dry-run` | Print bootstrap and Job manifests without cluster calls. |
 | `--host USER@HOST` | Override the SSH destination. |
+
+## Image
+
+`Dockerfile` installs the default Kali headless metapackages:
+
+```dockerfile
+apt-get update && apt-get -y install kali-linux-headless
+```
+
+`.github/workflows/image.yaml` builds and pushes it on changes to the
+`Dockerfile`, on manual dispatch, and weekly (Kali rolling moves). Published
+tags:
+
+| Tag | Purpose |
+|---|---|
+| `latest` | What `request_container.sh` uses. |
+| `kali-YYYYMMDD` | Build date, for pinning. |
+| `sha-<commit>` | Exact build, for rollback. |
+
+The workflow authenticates to GHCR with the repository's built-in
+`GITHUB_TOKEN` (`packages: write`); no repository secrets are needed. The
+`redteam-tools` package must be **public** (Package settings → Change
+visibility) because cluster pods pull it anonymously. Pods use
+`imagePullPolicy: Always` so a fresh push reaches a node that already cached an
+older `latest`.
+
+Build and test locally:
+
+```bash
+docker build -t ghcr.io/cvanh/redteam-tools:local .
+docker run --rm ghcr.io/cvanh/redteam-tools:local bash -lc 'nmap --version; msfconsole --version'
+```
+
+The image is amd64-only; rebuild it after Kubernetes nodes change architecture.
+It is about 9 GB uncompressed, so the first Job scheduled on a node can spend
+several minutes pulling it; `request_container.sh` waits up to 10 minutes for
+readiness. Use a longer `--ttl` for the first run on a fresh node.
+
+Kali's `nmap` binary ships with `cap_net_admin`, which baseline Pod Security
+cannot grant; the `Dockerfile` narrows the file capabilities to
+`cap_net_raw,cap_net_bind_service` so `nmap` is executable in the Job.
 
 ## Lifecycle
 
