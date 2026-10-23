@@ -36,9 +36,10 @@ Options:
   --no-attach     Create the Job, print how to connect, and exit.
   --rm            Delete the Job when the shell/command exits.
                   Without --rm the Job lives until --ttl expires.
-  --tor           Send egress through the cluster Tor SOCKS5 proxy.
+  --tor           Send egress through the cluster Tor SOCKS5 proxy (default).
                   Labels the pod bakkie.io/tor-egress=true, which makes the
                   tor-egress NetworkPolicy permit only the proxy and DNS.
+  --no-tor        Use the node's normal egress route instead of Tor.
   --dry-run       Print the manifests and remote commands without touching the cluster.
   --host USER@HOST
                   SSH destination. Default: ubuntu@45.135.58.222.
@@ -47,8 +48,8 @@ Options:
 Examples:
   bin/request_container.sh
   bin/request_container.sh --ttl 45m
-  bin/request_container.sh --cmd 'nmap -sV 10.0.0.0/24' --rm
-  bin/request_container.sh --tor --cmd 'curl -fsS https://check.torproject.org/api/ip'
+  bin/request_container.sh --cmd 'curl -fsS https://check.torproject.org/api/ip' --rm
+  bin/request_container.sh --no-tor --cmd 'nmap -sV 10.0.0.0/24' --rm
   bin/request_container.sh --no-attach --ttl 2h
 EOF
 }
@@ -204,7 +205,7 @@ cmd=""
 no_attach=0
 rm_after=0
 dry_run=0
-tor_egress=0
+tor_egress=1
 job_created=0
 
 cleanup_on_interrupt() {
@@ -265,6 +266,10 @@ while (($# > 0)); do
       ;;
     --tor)
       tor_egress=1
+      shift
+      ;;
+    --no-tor)
+      tor_egress=0
       shift
       ;;
     --dry-run)
