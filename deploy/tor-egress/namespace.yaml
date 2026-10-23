@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tor-egress
+  labels:
+    app.kubernetes.io/name: tor-egress
+    app.kubernetes.io/part-of: bakkie
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

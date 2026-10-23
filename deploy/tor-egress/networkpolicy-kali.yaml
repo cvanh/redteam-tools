@@ -1,0 +1,49 @@
+# Fail-closed egress for sandbox pods that opt in to Tor.
+#
+# NetworkPolicy cannot redirect traffic to a proxy by itself, so labelled pods
+# must point their clients at socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+# (request_container.sh --tor sets ALL_PROXY and friends). This policy makes
+# that mandatory: the only reachable destinations are the SOCKS port and the
+# cluster DNS pods, so an application that ignores the proxy variables fails
+# instead of leaking over the node's normal route.
+#
+# Tor forwards TCP only; UDP (other than DNS) and ICMP are dropped.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tor-egress-only
+  namespace: kali
+  labels:
+    app.kubernetes.io/name: tor-egress
+    app.kubernetes.io/part-of: bakkie
+spec:
+  podSelector:
+    matchLabels:
+      bakkie.io/tor-egress: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+  # Sandboxes never accept inbound connections.
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: tor-egress
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: tor-proxy
+      ports:
+        - protocol: TCP
+          port: 9050
+    # Resolver access for applications that call getaddrinfo() locally.
+    # Tools using socks5h (curl, git, ...) resolve through Tor instead.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

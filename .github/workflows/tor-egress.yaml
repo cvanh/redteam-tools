@@ -1,0 +1,114 @@
+name: tor-egress
+
+# Applies deploy/tor-egress through Argo CD. The cluster has no reachable
+# Kubernetes API from GitHub runners, so every call goes over SSH to the
+# control-plane host and through its "k8s" snap wrapper.
+#
+# Required repository secrets:
+#   CLUSTER_SSH_KEY    private key for ubuntu@45.135.58.222
+#   CLUSTER_KNOWN_HOSTS output of: ssh-keyscan 45.135.58.222
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - deploy/**
+      - .github/workflows/tor-egress.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tor-egress
+  cancel-in-progress: false
+
+env:
+  ARGOCD_VERSION: v3.5.6
+  ARGOCD_NAMESPACE: argocd
+  APP_NAME: bakkie-tor-egress
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.CLUSTER_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.CLUSTER_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          if [[ -z ${SSH_PRIVATE_KEY} || -z ${SSH_KNOWN_HOSTS} ]]; then
+            echo "::error::Set the CLUSTER_SSH_KEY and CLUSTER_KNOWN_HOSTS repository secrets."
+            exit 1
+          fi
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          cat > "$HOME/.ssh/config" <<'EOF'
+          Host cluster
+            HostName 45.135.58.222
+            User ubuntu
+            IdentityFile ~/.ssh/id_ed25519
+            IdentitiesOnly yes
+            BatchMode yes
+            StrictHostKeyChecking yes
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+          ssh cluster 'sudo -n k8s kubectl get nodes -o name'
+
+      # Installs or upgrades the pinned Argo CD release. Applying the manifest
+      # every run keeps the version declarative; the controller and repo server
+      # are the only components needed to reconcile the Application.
+      - name: Install Argo CD
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2029 # ${ARGOCD_NAMESPACE} expands on the runner.
+          ssh cluster "sudo -n k8s kubectl create namespace ${ARGOCD_NAMESPACE} --dry-run=client -o yaml | sudo -n k8s kubectl apply -f -"
+          # Server-side apply: the Argo CD CRDs exceed the 262144-byte limit
+          # for the client-side last-applied-configuration annotation.
+          # shellcheck disable=SC2029 # ${ARGOCD_NAMESPACE} expands on the runner.
+          curl -fsSL "https://raw.githubusercontent.com/argoproj/argo-cd/${ARGOCD_VERSION}/manifests/install.yaml" \
+            | ssh cluster "sudo -n k8s kubectl apply --server-side --force-conflicts -n ${ARGOCD_NAMESPACE} -f - > /dev/null"
+          ssh cluster 'sudo -n k8s kubectl wait --for=condition=Established crd/applications.argoproj.io --timeout=120s'
+          # shellcheck disable=SC2029 # ${ARGOCD_NAMESPACE} expands on the runner.
+          ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} rollout status deployment/argocd-repo-server --timeout=600s"
+          # shellcheck disable=SC2029 # ${ARGOCD_NAMESPACE} expands on the runner.
+          ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} rollout status statefulset/argocd-application-controller --timeout=600s"
+
+      # The project and Application are bootstrapped directly; everything they
+      # reference is then reconciled by Argo CD from Git.
+      - name: Apply Argo CD project and application
+        run: |
+          set -euo pipefail
+          ssh cluster 'sudo -n k8s kubectl apply -f -' < deploy/argocd/project.yaml
+          ssh cluster 'sudo -n k8s kubectl apply -f -' < deploy/argocd/application.yaml
+
+      - name: Wait for sync
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 900))
+          while ((SECONDS < deadline)); do
+            # shellcheck disable=SC2029 # expansions are intentional.
+            sync=$(ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} get application ${APP_NAME} -o jsonpath={.status.sync.status}" 2>/dev/null || true)
+            # shellcheck disable=SC2029 # expansions are intentional.
+            health=$(ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} get application ${APP_NAME} -o jsonpath={.status.health.status}" 2>/dev/null || true)
+            echo "sync=${sync:-unknown} health=${health:-unknown}"
+            if [[ ${sync:-} == Synced && ${health:-} == Healthy ]]; then
+              # shellcheck disable=SC2029 # expansions are intentional.
+              ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} get application ${APP_NAME}"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::${APP_NAME} did not become Synced/Healthy within 15 minutes"
+          # shellcheck disable=SC2029 # expansions are intentional.
+          ssh cluster "sudo -n k8s kubectl -n ${ARGOCD_NAMESPACE} get application ${APP_NAME} -o yaml" || true
+          exit 1

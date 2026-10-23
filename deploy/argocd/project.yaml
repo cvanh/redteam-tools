@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: bakkie
+  namespace: argocd
+  labels:
+    app.kubernetes.io/part-of: bakkie
+spec:
+  description: Bakkie sandbox egress controls
+  sourceRepos:
+    - https://github.com/cvanh/redteam-tools.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: tor-egress
+    - server: https://kubernetes.default.svc
+      namespace: kali
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: networking.k8s.io
+      kind: NetworkPolicy

@@ -1,0 +1,97 @@
+# SOCKS5 endpoint used by pods labelled bakkie.io/tor-egress=true.
+#
+# The image runs Tor as the unprivileged "tor" user (UID 100/GID 101) and
+# writes a torrc that listens on all interfaces. Only pods that the
+# NetworkPolicy in the kali namespace allows can reach it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tor-proxy
+  namespace: tor-egress
+  labels:
+    app.kubernetes.io/name: tor-proxy
+    app.kubernetes.io/part-of: bakkie
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tor-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tor-proxy
+        app.kubernetes.io/part-of: bakkie
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 101
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tor
+          image: leplusorg/tor:4.9.14@sha256:4ee1ca19d1846814f9595f6ded27c1f71b930fae926e70bfcc9444402ae14ae3
+          imagePullPolicy: IfNotPresent
+          env:
+            # Listen on the pod network, not loopback. Tor keeps its state in
+            # the container layer, so only pod replacement re-bootstraps.
+            - name: SOCKS_HOSTNAME
+              value: 0.0.0.0
+            - name: SOCKS_PORT
+              value: "9050"
+            - name: DATA_DIRECTORY
+              value: /var/lib/tor
+            - name: LOG_LEVEL
+              value: notice
+            # The image's /var/lib/tor is owned by the tor user. Tor refuses
+            # to use a directory owned by another UID, so keep the state in the
+            # container layer instead of an fsGroup-owned emptyDir.
+            - name: SET_PERMISSIONS
+              value: "true"
+          ports:
+            - name: socks
+              containerPort: 9050
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: socks
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: socks
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tor-proxy
+  namespace: tor-egress
+  labels:
+    app.kubernetes.io/name: tor-proxy
+    app.kubernetes.io/part-of: bakkie
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: tor-proxy
+  ports:
+    - name: socks
+      port: 9050
+      targetPort: socks
+      protocol: TCP

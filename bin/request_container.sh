@@ -36,6 +36,9 @@ Options:
   --no-attach     Create the Job, print how to connect, and exit.
   --rm            Delete the Job when the shell/command exits.
                   Without --rm the Job lives until --ttl expires.
+  --tor           Send egress through the cluster Tor SOCKS5 proxy.
+                  Labels the pod bakkie.io/tor-egress=true, which makes the
+                  tor-egress NetworkPolicy permit only the proxy and DNS.
   --dry-run       Print the manifests and remote commands without touching the cluster.
   --host USER@HOST
                   SSH destination. Default: ubuntu@45.135.58.222.
@@ -45,6 +48,7 @@ Examples:
   bin/request_container.sh
   bin/request_container.sh --ttl 45m
   bin/request_container.sh --cmd 'nmap -sV 10.0.0.0/24' --rm
+  bin/request_container.sh --tor --cmd 'curl -fsS https://check.torproject.org/api/ip'
   bin/request_container.sh --no-attach --ttl 2h
 EOF
 }
@@ -104,6 +108,28 @@ EOF
 }
 
 print_manifest() {
+  local tor_label="" tor_env=""
+  if ((tor_egress)); then
+    tor_label='        bakkie.io/tor-egress: "true"'
+    # socks5h resolves names at the proxy, so applications that honour these
+    # variables never leak DNS. The NetworkPolicy still limits non-proxy egress.
+    tor_env=$(cat <<'PROXY_ENV'
+          env:
+            - name: ALL_PROXY
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+            - name: all_proxy
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+            - name: HTTPS_PROXY
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+            - name: https_proxy
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+            - name: HTTP_PROXY
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+            - name: http_proxy
+              value: socks5h://tor-proxy.tor-egress.svc.cluster.local:9050
+PROXY_ENV
+)
+  fi
   cat <<EOF
 apiVersion: batch/v1
 kind: Job
@@ -125,6 +151,7 @@ spec:
         app.kubernetes.io/name: kali
         app.kubernetes.io/managed-by: request-container
         job-name: ${name}
+${tor_label}
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
@@ -148,6 +175,7 @@ spec:
           # the baseline Pod Security Standard.
           securityContext:
             allowPrivilegeEscalation: false
+${tor_env}
           resources:
             requests:
               cpu: 100m
@@ -176,6 +204,7 @@ cmd=""
 no_attach=0
 rm_after=0
 dry_run=0
+tor_egress=0
 job_created=0
 
 cleanup_on_interrupt() {
@@ -232,6 +261,10 @@ while (($# > 0)); do
       ;;
     --rm)
       rm_after=1
+      shift
+      ;;
+    --tor)
+      tor_egress=1
       shift
       ;;
     --dry-run)
@@ -300,6 +333,12 @@ fi
 printf 'Applying %s namespace and quota on %s...\n' "$NAMESPACE" "$host"
 if ! print_bootstrap | remote_apply_stdin >/dev/null; then
   die "failed to apply Namespace/ResourceQuota bootstrap"
+fi
+
+if ((tor_egress)); then
+  if ! remote_kubectl get networkpolicy tor-egress-only -n "$NAMESPACE" >/dev/null 2>&1; then
+    die "--tor requires NetworkPolicy ${NAMESPACE}/tor-egress-only; run the tor-egress GitHub workflow first"
+  fi
 fi
 
 if remote_kubectl get job "$name" -n "$NAMESPACE" >/dev/null 2>&1; then
